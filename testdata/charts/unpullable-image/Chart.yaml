@@ -1,0 +1,5 @@
+apiVersion: v2
+name: unpullable-image
+description: "Helmbulance fixture. Its image cannot be pulled, so the install never finishes: the run must be INCONCLUSIVE."
+type: application
+version: 0.1.0

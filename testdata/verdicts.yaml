@@ -1,0 +1,162 @@
+# The cases whose right answer is known. tools/verdicts runs each one and compares the exit code,
+# the verdict of every scenario and the findings with what is written here; docs/verdict-quality.md
+# explains how to read and extend it.
+#
+# A pair is one defect case and its fixed twin: the same chart with and without one defect. A
+# finding ID counts as covered when the defect case expects it and the twin does not.
+# The texts after a finding ID must appear in its evidence, so the finding is about the right object.
+
+# Finding IDs the source can emit that no pair covers yet. The check fails for any other uncovered
+# ID, and for an ID that is still listed here once a pair covers it.
+uncovered:
+  HB-CU-002: no fixture yet for an upgrade to a new chart version that changes a Secret
+  HB-CU-003: no fixture yet for a new chart version whose workloads do not become healthy
+  HB-K8S-001: no fixture yet for a chart that does not install on one Kubernetes version
+  HB-K8S-002: no fixture yet for a chart that installs on one Kubernetes version and does not become healthy
+  HB-SCAN-002: no fixture yet for a checksum annotation that changes on the first upgrade
+
+cases:
+  # upgrade-without-values
+  - name: regenerates-secret
+    pair: secret-regeneration
+    role: defect
+    command: test
+    args: [testdata/charts/regenerates-secret, --scenario, upgrade-without-values]
+    exit: 1
+    verdicts: {upgrade-without-values: FAIL}
+    findings:
+      HB-UV-001: [hb-upgrade-secret/password]
+      HB-UV-003: [Deployment/hb-upgrade-app]
+  - name: keeps-secret
+    pair: secret-regeneration
+    role: fixed
+    command: test
+    args: [testdata/charts/keeps-secret, --scenario, upgrade-without-values]
+    exit: 0
+    verdicts: {upgrade-without-values: PASS}
+
+  - name: drops-set-key
+    pair: set-key
+    role: defect
+    command: test
+    args: [testdata/charts/drops-set-key, --set, "encryptionKey={key}", --scenario, upgrade-without-values]
+    exit: 1
+    verdicts: {upgrade-without-values: FAIL}
+    findings:
+      HB-UV-002: [hb-upgrade-secret/encryption-key]
+  - name: keeps-set-key
+    pair: set-key
+    role: fixed
+    command: test
+    args: [testdata/charts/keeps-set-key, --set, "encryptionKey={key}", --scenario, upgrade-without-values]
+    exit: 0
+    verdicts: {upgrade-without-values: PASS}
+
+  # chart-upgrade
+  - name: upgrade-v2-breaks
+    pair: upgrade-v2
+    role: defect
+    command: test
+    args: [testdata/charts/upgrade-v2-breaks, --scenario, chart-upgrade, --from, testdata/charts/upgrade-v1, --from-version, 1.0.0]
+    exit: 1
+    verdicts: {chart-upgrade: FAIL}
+    findings:
+      HB-CU-001: [spec.selector, field is immutable]
+  - name: upgrade-v2-ok
+    pair: upgrade-v2
+    role: fixed
+    command: test
+    args: [testdata/charts/upgrade-v2-ok, --scenario, chart-upgrade, --from, testdata/charts/upgrade-v1, --from-version, 1.0.0]
+    exit: 0
+    verdicts: {chart-upgrade: PASS}
+
+  # zero-downtime
+  - name: zd-recreate
+    pair: zero-downtime
+    role: defect
+    command: test
+    args: [testdata/charts/zd-recreate, --scenario, zero-downtime]
+    exit: 1
+    verdicts: {zero-downtime: FAIL}
+    findings:
+      HB-ZD-001: [Deployment/hb-zd-web, Recreate]
+  - name: zd-rolling
+    pair: zero-downtime
+    role: fixed
+    command: test
+    args: [testdata/charts/zd-rolling, --scenario, zero-downtime]
+    exit: 0
+    verdicts: {zero-downtime: PASS}
+
+  # A run that cannot finish is INCONCLUSIVE, never a finding and never a PASS.
+  - name: unpullable-image
+    role: incomplete
+    command: test
+    args: [testdata/charts/unpullable-image, --scenario, upgrade-without-values, --timeout, 45s]
+    exit: 3
+    verdicts: {upgrade-without-values: INCONCLUSIVE}
+
+  # Static scan: no cluster, seconds. --strict makes candidates exit 1.
+  - name: scan-regenerates-secret
+    pair: scan-secret-regeneration
+    role: defect
+    command: scan
+    args: [testdata/charts/regenerates-secret, --strict]
+    exit: 1
+    verdicts:
+      scan:immutable-fields: SKIPPED
+      scan:first-upgrade-restart: PASS
+      scan:regenerated-secrets: FAIL
+    findings:
+      HB-SCAN-003: [Secret/hb-secret, password]
+  - name: scan-keeps-secret
+    pair: scan-secret-regeneration
+    role: fixed
+    command: scan
+    args: [testdata/charts/keeps-secret, --strict]
+    exit: 0
+    verdicts:
+      scan:immutable-fields: SKIPPED
+      scan:first-upgrade-restart: PASS
+      scan:regenerated-secrets: PASS
+
+  - name: scan-upgrade-v2-breaks
+    pair: scan-upgrade-v2
+    role: defect
+    command: scan
+    args: [testdata/charts/upgrade-v2-breaks, --from, testdata/charts/upgrade-v1, --from-version, 1.0.0, --strict]
+    exit: 1
+    verdicts:
+      scan:immutable-fields: FAIL
+      scan:first-upgrade-restart: PASS
+      scan:regenerated-secrets: PASS
+    findings:
+      HB-SCAN-001: [Deployment/hb-app, spec.selector]
+  - name: scan-upgrade-v2-ok
+    pair: scan-upgrade-v2
+    role: fixed
+    command: scan
+    args: [testdata/charts/upgrade-v2-ok, --from, testdata/charts/upgrade-v1, --from-version, 1.0.0, --strict]
+    exit: 0
+    verdicts:
+      scan:immutable-fields: PASS
+      scan:first-upgrade-restart: PASS
+      scan:regenerated-secrets: PASS
+
+  # Kubernetes matrix, on one version.
+  - name: matrix-deprecated-api
+    pair: api-versions
+    role: defect
+    command: matrix
+    args: [testdata/charts/deprecated-api]
+    exit: 1
+    verdicts: {"k8s-{k8s}": FAIL}
+    findings:
+      HB-K8S-003: [Endpoints]
+  - name: matrix-current-api
+    pair: api-versions
+    role: fixed
+    command: matrix
+    args: [testdata/charts/current-api]
+    exit: 0
+    verdicts: {"k8s-{k8s}": PASS}

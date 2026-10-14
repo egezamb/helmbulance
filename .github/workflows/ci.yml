@@ -1,13 +1,17 @@
-# Helmbulance's own CI: vet, unit tests and govulncheck, then every fixture pair on kind under
-# Helm 4 and Helm 3. Follows the CI row of the security model (docs/architecture.md §4): runs on
-# pull_request, never pull_request_target; read-only token; no secrets, no caches; actions pinned by
-# commit SHA; downloaded tools pinned by version and checksum.
+# Helmbulance's own CI: vet, unit tests and govulncheck, then every case of the verdict table
+# (testdata/verdicts.yaml) on kind under Helm 4 and Helm 3. Follows the CI row of the security model
+# (docs/architecture.md §4): runs on pull_request, never pull_request_target; read-only token; no
+# secrets, no caches; actions pinned by commit SHA; downloaded tools pinned by version and checksum.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main]
+  # Every night on main, with every case of the verdict table run three times: a verdict that changes
+  # between runs of the same chart shows up here and not on a pull request.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions: {}
 
@@ -95,34 +99,46 @@ jobs:
 
       - run: go build -o bin/helmbulance ./cmd/helmbulance
 
-      # fixtures.sh checks the exit code and the finding IDs of every pair: test, scan and matrix. It
-      # writes its logs and reports under mktemp -d; TMPDIR keeps them in one place for the artifact
-      # below.
-      - name: Fixture pairs
+      # fixtures.sh runs every case of testdata/verdicts.yaml (test, scan and matrix) and compares
+      # the exit code, the verdict of every scenario and the findings with the table. It also fails
+      # when a finding ID in the source has no pair in the table (docs/verdict-quality.md).
+      - name: Verdict table
         env:
-          TMPDIR: ${{ runner.temp }}/fixtures
-        run: |
-          mkdir -p "$TMPDIR"
-          scripts/fixtures.sh | tee "$RUNNER_TEMP/fixtures.txt"
+          OUT: ${{ runner.temp }}/verdicts
+          REPEAT: ${{ github.event_name == 'schedule' && '3' || '1' }}
+        run: scripts/fixtures.sh -out "$OUT" -repeat "$REPEAT"
 
       - name: Job summary
         if: always()
-        run: |
-          {
-            echo "### Fixtures, Helm $HELM_VERSION"
-            echo
-            echo '```'
-            cat "$RUNNER_TEMP/fixtures.txt" 2>/dev/null || echo "no results"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+        run: cat "$RUNNER_TEMP/verdicts/scorecard.md" >> "$GITHUB_STEP_SUMMARY" || echo "No scorecard was written." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload logs and reports
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fixtures-helm-${{ matrix.helm }}
-          path: ${{ runner.temp }}/fixtures
+          name: verdicts-helm-${{ matrix.helm }}
+          path: ${{ runner.temp }}/verdicts
           retention-days: 7
+
+  # How many small changes to the code the unit tests notice, per package (docs/verdict-quality.md).
+  # Report only: it has no threshold and is not a required check.
+  mutation:
+    name: mutation (report)
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # tee: the report is in the job log as well as in the summary.
+      - run: scripts/mutation.sh "$RUNNER_TEMP/mutation" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The composite Action (action.yml) on one fixture pair. The fixed twin runs with variables that
   # would point helm at another cluster; the Action must drop them, or helm fails to connect.
