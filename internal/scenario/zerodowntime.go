@@ -46,6 +46,8 @@ func (s ZeroDowntime) Run(ctx context.Context, env *Env) (res Result) {
 	res.Scenario = s.Name()
 	const release, ns = "hb-zd", zeroDowntimeNamespace
 	defer func() {
+		ctx, cancel := cleanupContext(ctx)
+		defer cancel()
 		_ = env.Kube.DeletePod(ctx, ns, "hb-traffic-control")
 		_ = env.Kube.DeletePod(ctx, ns, "hb-traffic-control-2")
 		_ = env.Kube.DeletePod(ctx, ns, "hb-traffic")

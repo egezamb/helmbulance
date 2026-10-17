@@ -19,6 +19,10 @@ type Command struct {
 	ExitCode int           `json:"exitCode"`
 }
 
+// killDelay is how long a command gets to stop after SIGTERM before it and its children are
+// killed. A variable, so tests can shorten it.
+var killDelay = 30 * time.Second
+
 // Runner executes commands with a fixed environment and records each one.
 type Runner struct {
 	Env []string
@@ -41,12 +45,16 @@ func (r *Runner) Run(ctx context.Context, name string, args ...string) ([]byte, 
 func (r *Runner) RunCapture(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = r.Env
+	stopAsGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	start := time.Now()
 	err := cmd.Run()
+	if ctx.Err() != nil {
+		killGroup(cmd)
+	}
 	rec := Command{Line: Mask(name, args), Duration: time.Since(start).Round(time.Millisecond)}
 	if cmd.ProcessState != nil {
 		rec.ExitCode = cmd.ProcessState.ExitCode()

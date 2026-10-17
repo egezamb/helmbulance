@@ -4,6 +4,7 @@ package scenario
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/egezamb/helmbulance/internal/execx"
 	"github.com/egezamb/helmbulance/internal/helm"
@@ -66,4 +67,13 @@ type Scenario interface {
 	Name() string
 	Description() string
 	Run(ctx context.Context, env *Env) Result
+}
+
+// cleanupTimeout bounds a scenario's cleanup, which runs even when the run was cancelled.
+const cleanupTimeout = 10 * time.Minute
+
+// cleanupContext keeps cleanup running after ctx is cancelled (a deadline or Ctrl-C), so the
+// release and namespace do not outlive the run and block the next one on a reused cluster.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 }

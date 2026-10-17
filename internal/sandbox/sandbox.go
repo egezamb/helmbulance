@@ -42,8 +42,10 @@ func StateDir() (string, error) {
 	return filepath.Join(home, ".helmbulance"), nil
 }
 
-// Create makes a new kind cluster with a random name.
-func Create(ctx context.Context, r *execx.Runner, nodeImage string) (*Cluster, error) {
+// NewCluster reserves a cluster with a random name and its own state directory, before any kind
+// command runs. The caller prints the name first, so a Ctrl-C during creation still leaves it on
+// screen for `kind delete cluster --name`.
+func NewCluster() (*Cluster, error) {
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return nil, err
@@ -55,26 +57,28 @@ func Create(ctx context.Context, r *execx.Runner, nodeImage string) (*Cluster, e
 	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		return nil, err
 	}
+	return c, nil
+}
 
+// Create brings up the reserved cluster with kind and records its CA fingerprint. On failure it
+// removes the cluster's state directory.
+func (c *Cluster) Create(ctx context.Context, r *execx.Runner, nodeImage string) error {
 	args := []string{"create", "cluster", "--name", c.Name, "--kubeconfig", c.Kubeconfig, "--wait", "180s"}
 	if nodeImage != "" {
 		args = append(args, "--image", nodeImage)
 	}
 	if _, err := r.Run(ctx, "kind", args...); err != nil {
 		_ = os.RemoveAll(c.dir)
-		return nil, err
+		return err
 	}
 	if err := os.Chmod(c.Kubeconfig, 0o600); err != nil {
-		return nil, err
+		return err
 	}
 	fp, err := caFingerprint(c.Kubeconfig)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := os.WriteFile(filepath.Join(c.dir, "ca.sha256"), []byte(fp), 0o600); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return os.WriteFile(filepath.Join(c.dir, "ca.sha256"), []byte(fp), 0o600)
 }
 
 // Open returns an existing cluster that Helmbulance created, after checking its CA fingerprint.

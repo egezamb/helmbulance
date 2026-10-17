@@ -41,6 +41,8 @@ func (s ChartUpgrade) Run(ctx context.Context, env *Env) (res Result) {
 	}
 	const release, ns = "hb-chart", chartUpgradeNamespace
 	defer func() {
+		ctx, cancel := cleanupContext(ctx)
+		defer cancel()
 		if err := env.Helm.Uninstall(ctx, release, ns); err != nil {
 			fmt.Fprintf(env.Log, "cleanup: %v\n", err)
 		}

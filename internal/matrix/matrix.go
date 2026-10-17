@@ -65,8 +65,11 @@ func Run(ctx context.Context, version string, o Options) (res scenario.Result) {
 		res.Summary = "no kind node image for Kubernetes " + version + "; supported: " + strings.Join(Versions(), ", ")
 		return res
 	}
-	fmt.Fprintf(o.Log, "Creating a Kubernetes %s cluster…\n", version)
-	c, err := sandbox.Create(ctx, o.Runner, image)
+	c, err := sandbox.NewCluster()
+	if err == nil {
+		fmt.Fprintf(o.Log, "Creating a Kubernetes %s cluster %s…\n", version, c.Name)
+		err = c.Create(ctx, o.Runner, image)
+	}
 	if err != nil {
 		res.Verdict = scenario.Inconclusive
 		res.Summary = "the cluster did not start: " + err.Error()
