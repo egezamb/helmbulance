@@ -75,12 +75,28 @@ func (s UpgradeValues) Run(ctx context.Context, env *Env) (res Result) {
 	if err != nil {
 		return inconclusive(res, "could not read pods after the control upgrade", err)
 	}
-	restarted := replacedPods(podsBefore, podsAfter)
+	restarted := restarts{owners: replacedPods(podsBefore, podsAfter)}
+	if len(restarted.owners) > 0 {
+		// A second no-op upgrade tells a restart on the first upgrade after install from one on
+		// every upgrade.
+		restarted.again = "unknown"
+		if err := env.Helm.Upgrade(ctx, release, ns, env.Chart, helm.Values{}); err == nil {
+			if podsAgain, err := env.Kube.Pods(ctx, ns); err == nil {
+				restarted.again = "no"
+				if len(replacedPods(podsAfter, podsAgain)) > 0 {
+					restarted.again = "yes"
+				}
+			}
+		}
+	}
+
+	// HB-UV-003 comes from the control, so every result from here on carries it, an
+	// inconclusive treatment included.
+	defer func() { res = withRestarts(res, restarted, installCmd, reuseCmd) }()
 
 	// Treatment: values files only. Without any --set or values file it would repeat the control.
 	if len(env.Values.Sets) == 0 && len(env.Values.Files) == 0 {
 		res, notes := s.verdict(ctx, res, installed, reused, nil, installCmd, reuseCmd, nil, env)
-		res = withRestarts(res, restarted, installCmd, reuseCmd)
 		res.Summary = withNotes(res.Summary, append(notes, secrets.notComparedNote())...)
 		return res
 	}
@@ -96,63 +112,106 @@ func (s UpgradeValues) Run(ctx context.Context, env *Env) (res Result) {
 	}
 
 	res, notes := s.verdict(ctx, res, installed, reused, filesOnly, installCmd, reuseCmd, filesCmd, env)
-	res = withRestarts(res, restarted, installCmd, reuseCmd)
 	res.Summary = withNotes(res.Summary, append(notes, secrets.notComparedNote())...)
 	return res
 }
 
-// replacedPods lists the workloads whose pods were replaced, by pod UID, between two readings.
+// replacedPods lists the workloads that rolled out a new pod template between two readings: an
+// owner with a pod whose revision it did not have before. The owner is matched by UID, so a
+// workload deleted and created again from the same template counts too. Pods without a revision
+// (Jobs, bare pods) and pods that went away without a new revision (finished, scaled down, a
+// pod deleted and recreated by its controller) are not restarts.
 func replacedPods(before, after []kube.Pod) []string {
-	uids := map[string]bool{}
-	for _, p := range after {
-		uids[p.UID] = true
+	had := map[string]bool{}
+	for _, p := range before {
+		if p.Revision != "" {
+			had[ownerKey(p)+"@"+p.Revision] = true
+		}
 	}
 	seen := map[string]bool{}
 	var owners []string
-	for _, p := range before {
-		owner := p.Owner
-		if strings.HasPrefix(owner, "ReplicaSet/") {
-			// Name the Deployment, not the ReplicaSet: <deployment>-<hash>.
-			if i := strings.LastIndex(owner, "-"); i > len("ReplicaSet/") {
-				owner = "Deployment/" + owner[len("ReplicaSet/"):i]
-			}
+	for _, p := range after {
+		owner := workload(p.Owner)
+		if p.Revision == "" || had[ownerKey(p)+"@"+p.Revision] || seen[owner] {
+			continue
 		}
-		if !uids[p.UID] && !seen[owner] {
-			seen[owner] = true
-			owners = append(owners, owner)
-		}
+		seen[owner] = true
+		owners = append(owners, owner)
 	}
 	sort.Strings(owners)
 	return owners
 }
 
-// withRestarts adds HB-UV-003 when an upgrade that changed nothing replaced pods.
-func withRestarts(res Result, restarted []string, installCmd, reuseCmd []execx.Command) Result {
-	if len(restarted) == 0 || res.Verdict == Inconclusive {
+// ownerKey identifies a pod's owner by UID, or by workload name when the UID is unknown.
+func ownerKey(p kube.Pod) string {
+	if p.OwnerUID != "" {
+		return p.OwnerUID
+	}
+	return workload(p.Owner)
+}
+
+// workload names a Deployment rather than its ReplicaSet (<deployment>-<hash>), so that two
+// revisions of one Deployment have one name.
+func workload(owner string) string {
+	if strings.HasPrefix(owner, "ReplicaSet/") {
+		if i := strings.LastIndex(owner, "-"); i > len("ReplicaSet/") {
+			return "Deployment/" + owner[len("ReplicaSet/"):i]
+		}
+	}
+	return owner
+}
+
+// restarts is what the no-op upgrades showed: the workloads the first one restarted, and whether
+// a second one restarted pods again ("yes", "no", or "unknown" when it could not run).
+type restarts struct {
+	owners []string
+	again  string
+}
+
+// withRestarts adds HB-UV-003 when an upgrade that changed nothing replaced pods. The control
+// showed it, so it stands even when the treatment could not run; the summary then says why.
+func withRestarts(res Result, restarted restarts, installCmd, reuseCmd []execx.Command) Result {
+	if len(restarted.owners) == 0 {
 		return res
+	}
+	incomplete := ""
+	if res.Verdict == Inconclusive {
+		incomplete = "; the rest did not run: " + res.Summary
 	}
 	var repro []string
 	for _, c := range installCmd {
 		repro = append(repro, reproLine(c.Line))
 	}
 	var evidence []string
-	for _, o := range restarted {
+	for _, o := range restarted.owners {
 		evidence = append(evidence, "`"+o+"`: its pods were replaced by an upgrade that changed no values")
+	}
+	title := "An upgrade that changes nothing restarts pods"
+	when := "A no-op `helm upgrade`, such as one from a GitOps sync, restarted these workloads"
+	switch restarted.again {
+	case "yes":
+		title = "Every upgrade, even one that changes nothing, restarts pods"
+		when = "Every `helm upgrade`, even a no-op one from a GitOps sync, restarts these workloads"
+		evidence = append(evidence, "A second upgrade that changed nothing replaced pods again.")
+	case "no":
+		title = "The first upgrade after install restarts pods, even when it changes nothing"
+		when = "The first `helm upgrade` after an install, even a no-op one from a GitOps sync, restarts these workloads"
+		evidence = append(evidence, "A second upgrade that changed nothing replaced no pods.")
 	}
 	res.Findings = append(res.Findings, Finding{
 		ID:       "HB-UV-003",
-		Title:    "An upgrade that changes nothing restarts pods",
+		Title:    title,
 		Severity: "medium",
 		Evidence: evidence,
-		Impact: "Every `helm upgrade`, even a no-op one from a GitOps sync, restarts these workloads: a " +
-			"short outage for single replicas, lost in-memory or emptyDir state, and noise in alerts.",
+		Impact: when + ": a short outage for single replicas, lost in-memory or emptyDir state, and " +
+			"noise in alerts.",
 		Fix: "Usually a pod-template annotation that changes on every render, such as a checksum of a " +
 			"Secret with a generated value, a timestamp or randAlphaNum. Keep generated values stable " +
 			"(see HB-UV-001) and hash only inputs that come from values.",
 		Reproduce: concat(repro, reproLine(reuseCmd[0].Line)),
 	})
 	res.Verdict = Fail
-	res.Summary = fmt.Sprintf("%d problem(s) across upgrades", len(res.Findings))
+	res.Summary = fmt.Sprintf("%d problem(s) across upgrades", len(res.Findings)) + incomplete
 	return res
 }
 

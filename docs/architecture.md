@@ -119,11 +119,12 @@ Each scenario goes through these phases:
 **`upgrade-without-values`** (implemented). Helm reuses the previous values only when an upgrade gets no values flags at all, so a plain "upgrade without values" changes nothing and cannot find the bug. The scenario has two steps:
 - **Control:** `helm upgrade` with no values flags. Helm reuses the install values, so nothing should change. Secrets that change here are regenerated on every render.
 - **Treatment:** `helm upgrade --reset-values -f <files>`. This leaves out every install-time `--set`, which is what happens when someone upgrades months later from the values file in git. Keys that change or disappear here, and did not already change in the control, are values the chart does not keep once set.
+- **Restarts (HB-UV-003):** a workload that rolls out a new pod template revision (`pod-template-hash`, `controller-revision-hash`) in the control, or that was deleted and created again (a new owner UID). Pods that finish, are scaled away or belong to a Job are not restarts. A second no-op upgrade then says whether pods restart on the first upgrade after install or on every upgrade. The finding stands even if the treatment cannot run.
 
 **`chart-upgrade`** (implemented).
 - Install the earlier version (`--from-version`), check that the release runs it, upgrade it to itself as the control, then upgrade to the chart under test with the same values. The report names both versions helm installed.
 - helm ignores `--version` for a chart on disk, so a local chart needs `--from` with the earlier chart, and a local `--from` must be the version `--from-version` names. Both are checked before anything runs (exit 2).
-- Report a failed upgrade with Helm's error, Secrets the new version changes or drops, and workloads that are not healthy afterwards.
+- Report a failed upgrade with Helm's error, Secrets the new version changes or drops, and workloads that are not healthy afterwards: pods not ready or restarted until the release has stayed clean for 30 s, and Jobs that failed since the upgrade, given up or still retrying. Restarts are compared per pod: a pod that survived the upgrade with its count from before it, a new pod with its count when first seen, since restarts before helm's `--wait` returned are its own startup. A Job's own pods are judged by the Job's status, not by their readiness.
 
 **`zero-downtime`** (implemented).
 - A pod in the release namespace sends one request every 200 ms to the most HTTP-like Service port (`--traffic-target`, `--traffic-path` to choose). ExternalName, headless and `externalIPs` Services are never chosen, so the traffic stays on the release's pods.
@@ -140,7 +141,7 @@ Each scenario goes through these phases:
 
 **`helmbulance matrix`** (implemented). A command rather than a scenario, because each Kubernetes version needs its own cluster.
 - For each version (kind node images pinned by digest: 1.34, 1.35, 1.36, 1.37): create a cluster, install, wait for the pods, collect the API server's warnings from helm's stderr, delete the cluster.
-- Reports a failed install, pods that never become ready (restarts alone are not counted, apps often restart once at first start), and warnings about deprecated APIs.
+- Reports a failed install, pods that never become ready, pods that restart while they are watched (the release must stay clean for 30 s; restarts before helm's `--wait` returned are not counted, apps often restart once at first start), Jobs that gave up or are retrying after a failed attempt, and warnings about deprecated APIs.
 - Known deprecations are also caught statically (`helm lint`, pluto); what the matrix adds is whether the chart actually runs on each version.
 
 **`reinstall`** (v0.1).

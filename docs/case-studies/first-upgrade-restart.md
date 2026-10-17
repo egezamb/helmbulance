@@ -17,7 +17,7 @@ When that Secret template also keeps generated values with `lookup` (reuse the s
 2. **On the first upgrade,** `lookup` returns the stored value. The hash now matches the real Secret, and that is a change, so every pod that carries it is replaced, although nothing changed.
 3. **From then on,** the hash is stable.
 
-The Secret itself never changes, so a Secret-only check misses this. Helmbulance's `upgrade-without-values` scenario compares pod UIDs across an upgrade with no new values (finding `HB-UV-003`). That control step is exactly the first upgrade after install.
+The Secret itself never changes, so a Secret-only check misses this. Helmbulance's `upgrade-without-values` scenario compares pod template revisions across an upgrade with no new values (finding `HB-UV-003`). That control step is exactly the first upgrade after install; a second no-op upgrade then tells "the first upgrade" from "every upgrade".
 
 ## How the charts were found
 

@@ -163,8 +163,25 @@ type Pod struct {
 	Name     string
 	UID      string
 	Owner    string // kind/name of the controlling object
+	OwnerUID string // its UID, which changes when the object is deleted and created again
 	Ready    bool
 	Restarts int
+	Phase    string // Pending, Running or Failed; Succeeded pods are left out
+	// Revision is the pod template revision of a Deployment (pod-template-hash) or a StatefulSet
+	// or DaemonSet (controller-revision-hash); "" for other pods.
+	Revision string
+}
+
+// FromJob reports whether p is an attempt of a Job. Such a pod ends by design, and a failed
+// attempt may be retried, so its readiness says nothing about the app; the Job's own status does.
+func (p Pod) FromJob() bool { return strings.HasPrefix(p.Owner, "Job/") }
+
+// FinishedJob reports whether p is a Job pod that has finished, so its outcome belongs to the Job's
+// status, not to readiness. A Job pod still Pending (stuck in ErrImagePull) or Running (crash-looping
+// in place) has not finished: its Job stays active with no failure recorded, so it is still judged
+// by readiness and restarts. Succeeded pods are already dropped from the pod list.
+func (p Pod) FinishedJob() bool {
+	return p.FromJob() && (p.Phase == "Succeeded" || p.Phase == "Failed")
 }
 
 // Pods returns the pods in ns with their readiness and restart counts. Finished pods and pods that
@@ -177,12 +194,14 @@ func (c *Client) Pods(ctx context.Context, ns string) ([]Pod, error) {
 	var list struct {
 		Items []struct {
 			Metadata struct {
-				Name              string  `json:"name"`
-				UID               string  `json:"uid"`
-				DeletionTimestamp *string `json:"deletionTimestamp"`
+				Name              string            `json:"name"`
+				UID               string            `json:"uid"`
+				DeletionTimestamp *string           `json:"deletionTimestamp"`
+				Labels            map[string]string `json:"labels"`
 				OwnerReferences   []struct {
 					Kind string `json:"kind"`
 					Name string `json:"name"`
+					UID  string `json:"uid"`
 				} `json:"ownerReferences"`
 			} `json:"metadata"`
 			Status struct {
@@ -208,9 +227,14 @@ func (c *Client) Pods(ctx context.Context, ns string) ([]Pod, error) {
 		if item.Metadata.DeletionTimestamp != nil { // on its way out, already replaced
 			continue
 		}
-		p := Pod{Name: item.Metadata.Name, UID: item.Metadata.UID}
+		p := Pod{Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase}
+		p.Revision = item.Metadata.Labels["pod-template-hash"]
+		if p.Revision == "" {
+			p.Revision = item.Metadata.Labels["controller-revision-hash"]
+		}
 		if refs := item.Metadata.OwnerReferences; len(refs) > 0 {
 			p.Owner = refs[0].Kind + "/" + refs[0].Name
+			p.OwnerUID = refs[0].UID
 		}
 		for _, c := range item.Status.Conditions {
 			if c.Type == "Ready" && c.Status == "True" {
@@ -223,6 +247,57 @@ func (c *Client) Pods(ctx context.Context, ns string) ([]Pod, error) {
 		pods = append(pods, p)
 	}
 	return pods, nil
+}
+
+// FailedJobs returns the Jobs in ns that gave up (condition Failed) or are retrying after a failed
+// attempt, as "Job/<name>: <message>".
+func (c *Client) FailedJobs(ctx context.Context, ns string) ([]string, error) {
+	out, err := c.Runner.Run(ctx, "kubectl", "--kubeconfig", c.Kubeconfig, "--namespace", ns, "get", "jobs", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Status struct {
+				Failed     int `json:"failed"`
+				Conditions []struct {
+					Type    string `json:"type"`
+					Status  string `json:"status"`
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse jobs: %w", err)
+	}
+	var failed []string
+	for _, item := range list.Items {
+		finished := false
+		for _, cond := range item.Status.Conditions {
+			if cond.Status != "True" {
+				continue
+			}
+			switch cond.Type {
+			case "Failed":
+				failed = append(failed, "Job/"+item.Metadata.Name+": "+strings.TrimSpace(cond.Reason+" "+cond.Message))
+				finished = true
+			case "Complete":
+				finished = true
+			}
+		}
+		// The Failed condition comes only after the whole back-off, about ten minutes with the
+		// default backoffLimit; a Job still retrying after a failed attempt counts too.
+		if !finished && item.Status.Failed > 0 {
+			failed = append(failed, fmt.Sprintf("Job/%s: %d failed attempt(s), still retrying", item.Metadata.Name, item.Status.Failed))
+		}
+	}
+	sort.Strings(failed)
+	return failed, nil
 }
 
 // Service is one Service of the release and the ports it exposes.
