@@ -1,0 +1,5 @@
+apiVersion: v2
+name: reinstall-templated-pvc
+description: "Helmbulance fixture. A Deployment whose PVC is a chart template, so helm uninstall deletes it and a reinstall starts empty with a new password. Nothing is lost, so reinstall must pass."
+type: application
+version: 0.1.0

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: reinstall-loses-creds
+description: "Helmbulance fixture. A database-like StatefulSet keeps its volume after helm uninstall, but its password is generated again on every install."
+type: application
+version: 0.1.0

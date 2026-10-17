@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/egezamb/helmbulance/internal/execx"
 )
@@ -507,6 +508,153 @@ func (c *Client) Logs(ctx context.Context, ns, name string) (string, error) {
 func (c *Client) LastLogLine(ctx context.Context, ns, name string) (string, error) {
 	out, err := c.Runner.Run(ctx, "kubectl", "--kubeconfig", c.Kubeconfig, "--namespace", ns, "logs", "--tail=1", name)
 	return strings.TrimSpace(string(out)), err
+}
+
+// PVC is one PersistentVolumeClaim. The UID tells a claim that survived from one that was deleted
+// and created again under the same name.
+type PVC struct {
+	Name, UID, Phase string
+}
+
+// PVCs returns the PersistentVolumeClaims in ns, sorted by name.
+func (c *Client) PVCs(ctx context.Context, ns string) ([]PVC, error) {
+	out, err := c.Runner.Run(ctx, "kubectl", "--kubeconfig", c.Kubeconfig, "--namespace", ns, "get", "pvc", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+				UID  string `json:"uid"`
+			} `json:"metadata"`
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse pvcs: %w", err)
+	}
+	var pvcs []PVC
+	for _, item := range list.Items {
+		pvcs = append(pvcs, PVC{Name: item.Metadata.Name, UID: item.Metadata.UID, Phase: item.Status.Phase})
+	}
+	sort.Slice(pvcs, func(i, j int) bool { return pvcs[i].Name < pvcs[j].Name })
+	return pvcs, nil
+}
+
+// RunWithPVC runs script once in a pod that mounts the PersistentVolumeClaim claim at /pvc, and
+// returns what it printed. The pod runs as root with only the capabilities it needs to write into a
+// volume whatever owner the app gave its files (CHOWN, DAC_OVERRIDE, FOWNER), no service account
+// token, small resource limits, and is deleted afterwards, even when ctx is cancelled. It returns
+// as soon as the pod fails, and gives up after timeout.
+func (c *Client) RunWithPVC(ctx context.Context, ns, name, image, claim, script string, timeout time.Duration) (string, error) {
+	overrides, err := json.Marshal(map[string]any{"spec": map[string]any{
+		"restartPolicy":                "Never",
+		"automountServiceAccountToken": false,
+		"securityContext":              map[string]any{"seccompProfile": map[string]any{"type": "RuntimeDefault"}},
+		"containers": []any{map[string]any{
+			"name": name, "image": image, "command": []string{"sh", "-c", script},
+			"volumeMounts": []any{map[string]any{"name": "pvc", "mountPath": "/pvc"}},
+			"securityContext": map[string]any{
+				"runAsUser": 0, "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+				"capabilities": map[string]any{"drop": []string{"ALL"}, "add": []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}},
+			},
+			"resources": map[string]any{
+				"requests": map[string]string{"cpu": "10m", "memory": "16Mi"},
+				"limits":   map[string]string{"cpu": "100m", "memory": "32Mi"},
+			},
+		}},
+		"volumes": []any{map[string]any{"name": "pvc", "persistentVolumeClaim": map[string]any{"claimName": claim}}},
+	}})
+	if err != nil {
+		return "", err
+	}
+	base := []string{"--kubeconfig", c.Kubeconfig, "--namespace", ns}
+	defer func() {
+		_, _ = c.Runner.Run(context.WithoutCancel(ctx), "kubectl", append(base, "delete", "pod", name, "--ignore-not-found", "--wait=true")...)
+	}()
+	if _, err := c.Runner.Run(ctx, "kubectl", append(base, "run", name, "--image", image, "--restart", "Never",
+		"--overrides", string(overrides))...); err != nil {
+		return "", err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := c.Runner.Run(ctx, "kubectl", append(base, "get", "pod", name, "-o", "jsonpath={.status.phase}")...)
+		if err != nil {
+			return "", err
+		}
+		phase := strings.TrimSpace(string(out))
+		if phase == "Succeeded" {
+			break
+		}
+		if phase == "Failed" || time.Now().After(deadline) {
+			return "", fmt.Errorf("pod %s is %s after %s (mounting %s)", name, phase, timeout, claim)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	out, err := c.Runner.Run(ctx, "kubectl", append(base, "logs", name)...)
+	return string(out), err
+}
+
+// ClaimUsers maps each of the given claims to the workloads (kind/name) that mount it: through a
+// persistentVolumeClaim volume, or as a StatefulSet's claim from a volume claim template
+// (<template>-<statefulset>-<ordinal>).
+func (c *Client) ClaimUsers(ctx context.Context, ns string, claims []string) (map[string][]string, error) {
+	out, err := c.Runner.Run(ctx, "kubectl", "--kubeconfig", c.Kubeconfig, "--namespace", ns,
+		"get", "deployments,statefulsets,daemonsets", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				VolumeClaimTemplates []struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+				} `json:"volumeClaimTemplates"`
+				Template struct {
+					Spec struct {
+						Volumes []struct {
+							PersistentVolumeClaim struct {
+								ClaimName string `json:"claimName"`
+							} `json:"persistentVolumeClaim"`
+						} `json:"volumes"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse workloads: %w", err)
+	}
+	users := map[string][]string{}
+	for _, item := range list.Items {
+		w := item.Kind + "/" + item.Metadata.Name
+		for _, claim := range claims {
+			uses := false
+			for _, v := range item.Spec.Template.Spec.Volumes {
+				uses = uses || v.PersistentVolumeClaim.ClaimName == claim
+			}
+			for _, t := range item.Spec.VolumeClaimTemplates {
+				uses = uses || strings.HasPrefix(claim, t.Metadata.Name+"-"+item.Metadata.Name+"-")
+			}
+			if uses {
+				users[claim] = append(users[claim], w)
+			}
+		}
+	}
+	return users, nil
 }
 
 // DeletePod removes a pod without waiting for it to go.

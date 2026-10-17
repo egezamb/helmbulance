@@ -1,0 +1,9 @@
+# A templated claim belongs to the release: helm uninstall deletes it, and the reinstall makes a new
+# one under the same name.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 10Mi}}

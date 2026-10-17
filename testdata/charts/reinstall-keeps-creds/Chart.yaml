@@ -1,0 +1,5 @@
+apiVersion: v2
+name: reinstall-keeps-creds
+description: "Helmbulance fixture. Fixed twin of reinstall-loses-creds: the password Secret is kept on uninstall and reused with lookup."
+type: application
+version: 0.1.0

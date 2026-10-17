@@ -35,6 +35,7 @@ var scenarios = []scenario.Scenario{
 	scenario.UpgradeValues{},
 	scenario.ChartUpgrade{},
 	scenario.ZeroDowntime{},
+	scenario.Reinstall{},
 }
 
 type multiFlag []string

@@ -34,7 +34,7 @@ AI review can propose findings. Helmbulance only reports a finding once the clus
 | `zero-downtime` | Do requests fail while the pods are replaced, during a rolling restart or a version upgrade? How long is the outage? | **works** |
 | `helmbulance scan` | Static pre-screen, no cluster, seconds: immutable fields changed since `--from-version`, checksums that change on the first upgrade, Secrets generated anew on every render. Lists **candidates** and the `test` run that confirms each. | **works** |
 | `helmbulance matrix` | Does the chart install and run on every supported Kubernetes version (1.34–1.37), and does the API server warn about what it creates? | **works** |
-| `reinstall` | After `helm uninstall` and `helm install`, do data and credentials come back? | v0.1 |
+| `reinstall` | After `helm uninstall` and `helm install`, do data and credentials come back? | **works** |
 | `gitops-render` | Does the chart render differently without cluster access, as Argo CD does (`lookup` returns nothing there)? | v0.1 |
 | `network-isolation` | Are undeclared ports and bundled datastores unreachable from other namespaces, and is the NetworkPolicy actually enforced? | v0.1 |
 | `secret-rotation` | When a password changes, does every component that uses it restart and keep working? | v0.2 |
