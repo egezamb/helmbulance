@@ -125,6 +125,49 @@ func (c *Client) SecretConsumers(ctx context.Context, ns string) (map[string][]s
 	return consumers, nil
 }
 
+// StatefulWorkloads returns the workloads (kind/name) in ns that keep data across restarts: a
+// StatefulSet with volume claim templates, or any workload whose pods mount a PersistentVolumeClaim.
+// A credential such a workload reads was probably written into its data at first start.
+func (c *Client) StatefulWorkloads(ctx context.Context, ns string) (map[string]bool, error) {
+	out, err := c.Runner.Run(ctx, "kubectl", "--kubeconfig", c.Kubeconfig, "--namespace", ns,
+		"get", "deployments,statefulsets,daemonsets", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items []struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				VolumeClaimTemplates []json.RawMessage `json:"volumeClaimTemplates"`
+				Template             struct {
+					Spec struct {
+						Volumes []struct {
+							PersistentVolumeClaim *json.RawMessage `json:"persistentVolumeClaim"`
+						} `json:"volumes"`
+					} `json:"spec"`
+				} `json:"template"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse workloads: %w", err)
+	}
+	stateful := map[string]bool{}
+	for _, item := range list.Items {
+		keeps := len(item.Spec.VolumeClaimTemplates) > 0
+		for _, v := range item.Spec.Template.Spec.Volumes {
+			keeps = keeps || v.PersistentVolumeClaim != nil
+		}
+		if keeps {
+			stateful[item.Kind+"/"+item.Metadata.Name] = true
+		}
+	}
+	return stateful, nil
+}
+
 type podSpec struct {
 	InitContainers []container `json:"initContainers"`
 	Containers     []container `json:"containers"`

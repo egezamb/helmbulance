@@ -80,3 +80,27 @@ func TestUnpairStillRead(t *testing.T) {
 		t.Errorf("back = %v, want %v", back, want)
 	}
 }
+
+func TestSplitExpected(t *testing.T) {
+	changes := []oracle.Change{
+		{Ref: "hb-upgrade-webhook-tls/tls.crt", Kind: oracle.Changed},
+		{Ref: "hb-upgrade-webhook-tls/tls.key", Kind: oracle.Changed},
+		{Ref: "hb-upgrade-db/password", Kind: oracle.Changed},
+	}
+	rest, expected := splitExpected(changes, []string{"*-webhook-tls/*"})
+	if len(expected) != 2 || len(rest) != 1 || rest[0].Ref != "hb-upgrade-db/password" {
+		t.Errorf("rest = %v, expected = %v", rest, expected)
+	}
+	if rest, expected := splitExpected(changes, nil); len(rest) != 3 || len(expected) != 0 {
+		t.Errorf("no patterns: rest = %v, expected = %v", rest, expected)
+	}
+	// A glob does not cross the "/" between the Secret and the key.
+	if _, expected := splitExpected(changes, []string{"*"}); len(expected) != 0 {
+		t.Errorf(`"*" matched %v; it should match no "secret/key" reference`, expected)
+	}
+	// A removed key is not a rotation, so a matching pattern does not silence it (review item 5).
+	removed := []oracle.Change{{Ref: "hb-upgrade-webhook-tls/tls.crt", Kind: oracle.Removed}}
+	if rest, expected := splitExpected(removed, []string{"*-webhook-tls/*"}); len(rest) != 1 || len(expected) != 0 {
+		t.Errorf("a removed key under a rotation pattern: rest = %v, expected = %v", rest, expected)
+	}
+}

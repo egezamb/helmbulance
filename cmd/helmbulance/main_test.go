@@ -96,3 +96,16 @@ func TestRefuseFromVersionThatALocalFromIsNot(t *testing.T) {
 		t.Error("a remote --from was refused; helm honours --version there")
 	}
 }
+
+func TestCheckRotations(t *testing.T) {
+	for _, ok := range []string{"*-webhook-tls/*", "hb-upgrade-ca/tls.crt", "*/ca.crt"} {
+		if err := checkRotations([]string{ok}); err != nil {
+			t.Errorf("checkRotations(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"webhook-tls", "/tls.crt", "ca/", "ns/secret/key", "[ca/tls.crt"} {
+		if err := checkRotations([]string{bad}); err == nil {
+			t.Errorf("checkRotations(%q) = nil, want an error", bad)
+		}
+	}
+}

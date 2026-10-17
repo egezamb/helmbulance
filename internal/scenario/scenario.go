@@ -39,7 +39,11 @@ type Env struct {
 	// Empty picks the Service port that looks most like HTTP, and "/".
 	TrafficTarget string
 	TrafficPath   string
-	Log           io.Writer
+
+	// ExpectedRotation lists Secret keys ("secret/key", globs allowed) that the chart changes on
+	// purpose, such as a webhook certificate it reissues. They are named, not reported.
+	ExpectedRotation []string
+	Log              io.Writer
 }
 
 // Finding is one reproduced problem.

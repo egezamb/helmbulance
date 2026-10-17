@@ -162,6 +162,11 @@ func (s UpgradeValues) verdict(ctx context.Context, res Result, installed, reuse
 	if err != nil {
 		fmt.Fprintf(env.Log, "could not map Secret consumers: %v\n", err)
 	}
+	stateful, err := env.Kube.StatefulWorkloads(ctx, upgradeNamespace)
+	if err != nil {
+		fmt.Fprintf(env.Log, "could not find stateful workloads: %v\n", err)
+	}
+	statefulKnown := err == nil
 
 	var repro []string
 	for _, c := range installCmd {
@@ -170,19 +175,30 @@ func (s UpgradeValues) verdict(ctx context.Context, res Result, installed, reuse
 
 	control := oracle.Diff(installed, reused)
 	regenerated, added := splitAdded(control)
+	regenerated, rotated := splitExpected(regenerated, env.ExpectedRotation)
 	if len(regenerated) > 0 {
 		steps := concat(repro, reproLine(reuseCmd[0].Line))
+		impact := "Every `helm upgrade` replaces these values. Passwords that a database stored at " +
+			"its first start stop matching, and anything encrypted or signed with the old value " +
+			"can no longer be read."
+		fix := "Generate the value only when it does not exist yet: read the current Secret with " +
+			"`lookup` and reuse its value, and add `helm.sh/resource-policy: keep`. `lookup` " +
+			"returns nothing under `helm template` (Argo CD), so also support an existingSecret."
+		if onlyTLS(regenerated) {
+			impact = "Every `helm upgrade` issues new certificates. Anything that trusts the old CA (a " +
+				"webhook's caBundle, a client that pins the CA, a sidecar that cached it) fails until " +
+				"it gets the new one."
+			fix = "If the rotation is not meant to happen on every upgrade, keep the certificate with " +
+				"`lookup` like any generated value, or let cert-manager issue it. If it is on purpose, " +
+				"make sure every consumer is updated in the same upgrade."
+		}
 		res.Findings = append(res.Findings, Finding{
-			ID:       "HB-UV-001",
-			Title:    "Secrets change on every upgrade, even with the same values",
-			Severity: "high",
-			Evidence: describe(regenerated, consumers),
-			Impact: "Every `helm upgrade` replaces these values. Passwords that a database stored at " +
-				"its first start stop matching, and anything encrypted or signed with the old value " +
-				"can no longer be read.",
-			Fix: "Generate the value only when it does not exist yet: read the current Secret with " +
-				"`lookup` and reuse its value, and add `helm.sh/resource-policy: keep`. `lookup` " +
-				"returns nothing under `helm template` (Argo CD), so also support an existingSecret.",
+			ID:        "HB-UV-001",
+			Title:     "Secrets change on every upgrade, even with the same values",
+			Severity:  worstSeverity(regenerated, consumers, stateful, statefulKnown),
+			Evidence:  describe(regenerated, consumers),
+			Impact:    impact,
+			Fix:       fix,
 			Reproduce: steps,
 		})
 	}
@@ -193,6 +209,8 @@ func (s UpgradeValues) verdict(ctx context.Context, res Result, installed, reuse
 		var more []oracle.Change
 		changes, more = splitAdded(withoutRefs(oracle.Diff(reused, filesOnly), control))
 		added = append(added, more...)
+		changes, more = splitExpected(changes, env.ExpectedRotation)
+		rotated = append(rotated, more...)
 	}
 	if len(changes) > 0 {
 		steps := concat(repro, reproLine(filesCmd[0].Line))
@@ -203,7 +221,7 @@ func (s UpgradeValues) verdict(ctx context.Context, res Result, installed, reuse
 		res.Findings = append(res.Findings, Finding{
 			ID:       "HB-UV-002",
 			Title:    title,
-			Severity: "high",
+			Severity: worstSeverity(changes, consumers, stateful, statefulKnown),
 			Evidence: describe(changes, consumers),
 			Impact: "Upgrading from the values file in git, without repeating every --set used at " +
 				"install, silently replaces or removes these values. For an encryption key this " +
@@ -225,16 +243,21 @@ func (s UpgradeValues) verdict(ctx context.Context, res Result, installed, reuse
 			res.Summary = noSecretsTested
 		}
 	}
-	return res, []string{note("keys added by an upgrade, not a finding", describe(added, consumers))}
+	return res, []string{
+		note("keys added by an upgrade, not a finding", describe(added, consumers)),
+		note("rotated as expected (--expected-rotation)", describe(rotated, consumers)),
+		unknownStatefulNote(statefulKnown, regenerated, changes),
+	}
 }
 
 func describe(changes []oracle.Change, consumers map[string][]string) []string {
 	var lines []string
 	for _, c := range changes {
 		line := fmt.Sprintf("`%s` %s", c.Ref, c.Kind)
-		secret, _, _ := strings.Cut(c.Ref, "/")
-		users := append(append([]string{}, consumers[c.Ref]...), consumers[secret+"/*"]...)
-		if len(users) > 0 {
+		if class := keyClass(c); class != oracle.ClassOther && c.Kind != oracle.MovedKind {
+			line += ", " + class
+		}
+		if users := readers(c, consumers); len(users) > 0 {
 			line += " (read by " + strings.Join(users, ", ") + ")"
 		}
 		lines = append(lines, line)

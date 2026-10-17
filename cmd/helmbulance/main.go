@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"time"
 
@@ -74,8 +75,9 @@ func usage() {
 
 func test(args []string) int {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	var files, sets, only multiFlag
+	var files, sets, only, rotations multiFlag
 	fs.Var(&files, "f", "values file (repeatable)")
+	fs.Var(&rotations, "expected-rotation", "Secret key the chart changes on purpose, as secret/key with * globs, e.g. '*-webhook-tls/*' (repeatable); it is named in the summary, not reported")
 	fs.Var(&sets, "set", "install-time value, key=value (repeatable). Values of four or more characters are hidden in reports. Upgrades test what happens when it is left out.")
 	fs.Var(&only, "scenario", "run only this scenario (repeatable)")
 	cluster := fs.String("cluster", "", "reuse a sandbox cluster created earlier by helmbulance")
@@ -105,6 +107,10 @@ func test(args []string) int {
 		return exitError
 	}
 	if refuseRemote(*allowRemote, chart, *from) || refuseFromVersion(chart, *from, *fromVersion, localVersion) {
+		return exitError
+	}
+	if err := checkRotations(rotations); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return exitError
 	}
 
@@ -165,16 +171,19 @@ func test(args []string) int {
 		FromVersion:   *fromVersion,
 		TrafficTarget: *trafficTarget,
 		TrafficPath:   *trafficPath,
+
+		ExpectedRotation: rotations,
 	}
 
 	rep := &report.Report{
-		SchemaVersion: report.SchemaVersion,
-		Chart:         chart,
-		ValuesFiles:   files,
-		SetKeys:       execx.SetKeys(sets),
-		HelmVersion:   h.Version(ctx),
-		Cluster:       c.Name,
-		Started:       started,
+		SchemaVersion:    report.SchemaVersion,
+		Chart:            chart,
+		ValuesFiles:      files,
+		SetKeys:          execx.SetKeys(sets),
+		ExpectedRotation: rotations,
+		HelmVersion:      h.Version(ctx),
+		Cluster:          c.Name,
+		Started:          started,
 	}
 	for _, s := range selected {
 		fmt.Printf("▶ %s\n", s.Name())
@@ -422,4 +431,19 @@ func scanCmd(args []string) int {
 		return exitFindings
 	}
 	return exitClean
+}
+
+// checkRotations rejects --expected-rotation patterns that could never match a "secret/key"
+// reference, so a typo does not silently report a rotation the user meant to allow.
+func checkRotations(patterns []string) error {
+	for _, p := range patterns {
+		secret, key, ok := strings.Cut(p, "/")
+		if !ok || secret == "" || key == "" || strings.Contains(key, "/") {
+			return fmt.Errorf("--expected-rotation %q: want secret/key, e.g. '*-webhook-tls/tls.crt' or '*-webhook-tls/*'", p)
+		}
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("--expected-rotation %q: %v", p, err)
+		}
+	}
+	return nil
 }

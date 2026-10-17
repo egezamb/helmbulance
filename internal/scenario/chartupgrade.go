@@ -114,6 +114,11 @@ func (s ChartUpgrade) Run(ctx context.Context, env *Env) (res Result) {
 	if err != nil {
 		fmt.Fprintf(env.Log, "could not map Secret consumers: %v\n", err)
 	}
+	stateful, err := env.Kube.StatefulWorkloads(ctx, ns)
+	if err != nil {
+		fmt.Fprintf(env.Log, "could not find stateful workloads: %v\n", err)
+	}
+	statefulKnown := err == nil
 
 	regenerated := oracle.Diff(installed, control)
 	// A new version adding keys is normal; only changed and removed keys break existing data.
@@ -121,11 +126,12 @@ func (s ChartUpgrade) Run(ctx context.Context, env *Env) (res Result) {
 	rest, moved := oracle.Moved(control, upgraded, withoutRefs(oracle.Diff(control, upgraded), regenerated))
 	moved, back := unpairStillRead(moved, consumers)
 	changes, added := splitAdded(append(rest, back...))
+	changes, rotated := splitExpected(changes, env.ExpectedRotation)
 	if len(changes) > 0 {
 		res.Findings = append(res.Findings, Finding{
 			ID:       "HB-CU-002",
 			Title:    "The new version changes or drops Secret values of an existing release",
-			Severity: "high",
+			Severity: worstSeverity(changes, consumers, stateful, statefulKnown),
 			Evidence: describe(changes, consumers),
 			Impact: "After the upgrade the application gets different credentials or keys than the " +
 				"ones its data was created with, or loses them.",
@@ -163,6 +169,8 @@ func (s ChartUpgrade) Run(ctx context.Context, env *Env) (res Result) {
 	res.Summary = withNotes(res.Summary,
 		note("keys added by the new version, not a finding", describe(added, consumers)),
 		note("values moved to another key, not a finding", describe(moved, consumers)),
+		note("rotated as expected (--expected-rotation)", describe(rotated, consumers)),
+		unknownStatefulNote(statefulKnown, changes),
 		secrets.notComparedNote())
 	return res
 }

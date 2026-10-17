@@ -19,16 +19,18 @@ const SchemaVersion = 1
 
 // Report is everything a run produced.
 type Report struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	Chart         string            `json:"chart"`
-	ValuesFiles   []string          `json:"valuesFiles"`
-	SetKeys       []string          `json:"setKeys"` // keys only, never values
-	HelmVersion   string            `json:"helmVersion"`
-	Cluster       string            `json:"cluster"`
-	Started       time.Time         `json:"started"`
-	Duration      string            `json:"duration"`
-	Results       []scenario.Result `json:"results"`
-	Commands      []execx.Command   `json:"commands"`
+	SchemaVersion int      `json:"schemaVersion"`
+	Chart         string   `json:"chart"`
+	ValuesFiles   []string `json:"valuesFiles"`
+	SetKeys       []string `json:"setKeys"` // keys only, never values
+	// ExpectedRotation is what --expected-rotation allowed, so a reader sees what was not reported.
+	ExpectedRotation []string          `json:"expectedRotation,omitempty"`
+	HelmVersion      string            `json:"helmVersion"`
+	Cluster          string            `json:"cluster"`
+	Started          time.Time         `json:"started"`
+	Duration         string            `json:"duration"`
+	Results          []scenario.Result `json:"results"`
+	Commands         []execx.Command   `json:"commands"`
 }
 
 // Worst returns the overall verdict: FAIL beats INCONCLUSIVE beats PASS. SKIPPED counts for
@@ -76,6 +78,9 @@ func (r *Report) Markdown() string {
 	}
 	if len(r.SetKeys) > 0 {
 		fmt.Fprintf(&b, "- Install-time `--set` keys: `%s`\n", strings.Join(r.SetKeys, "`, `"))
+	}
+	if len(r.ExpectedRotation) > 0 {
+		fmt.Fprintf(&b, "- Expected rotations (not reported): `%s`\n", strings.Join(r.ExpectedRotation, "`, `"))
 	}
 	fmt.Fprintf(&b, "- Helm: %s\n- Sandbox: kind cluster `%s`\n- Duration: %s\n\n", r.HelmVersion, r.Cluster, r.Duration)
 

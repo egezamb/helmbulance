@@ -43,3 +43,19 @@ func TestServicesReadsTypeAndAddresses(t *testing.T) {
 		t.Errorf("Services =\n%+v\nwant\n%+v", got, want)
 	}
 }
+
+func TestStatefulWorkloads(t *testing.T) {
+	c := fakeKubectl(t, `{"items":[
+		{"kind":"StatefulSet","metadata":{"name":"db"},"spec":{"volumeClaimTemplates":[{"metadata":{"name":"data"}}]}},
+		{"kind":"StatefulSet","metadata":{"name":"cache"},"spec":{"template":{"spec":{"volumes":[{"name":"tmp","emptyDir":{}}]}}}},
+		{"kind":"Deployment","metadata":{"name":"single-db"},"spec":{"template":{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"d"}}]}}}},
+		{"kind":"Deployment","metadata":{"name":"web"},"spec":{"template":{"spec":{"volumes":[{"name":"cfg","secret":{"secretName":"s"}}]}}}}
+	]}`)
+	got, err := c.StatefulWorkloads(t.Context(), "ns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"StatefulSet/db": true, "Deployment/single-db": true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("StatefulWorkloads = %v, want %v", got, want)
+	}
+}

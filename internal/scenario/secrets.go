@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -149,4 +150,29 @@ func noKeys(snapshots ...oracle.SecretSnapshot) bool {
 		}
 	}
 	return true
+}
+
+// splitExpected separates the changes that match an --expected-rotation pattern ("secret/key",
+// with path.Match globs such as "*-webhook-tls/*"), so rotations the chart makes on purpose are
+// named in the summary instead of becoming findings. A rotation is a changed value, so only a
+// changed key is ever expected: a removed key the new render drops is still reported, even under a
+// matching pattern (review item 5).
+func splitExpected(changes []oracle.Change, patterns []string) (rest, expected []oracle.Change) {
+	for _, c := range changes {
+		if c.Kind == oracle.Changed && matchesAny(c.Ref, patterns) {
+			expected = append(expected, c)
+		} else {
+			rest = append(rest, c)
+		}
+	}
+	return rest, expected
+}
+
+func matchesAny(ref string, patterns []string) bool {
+	for _, p := range patterns {
+		if ok, _ := path.Match(p, ref); ok {
+			return true
+		}
+	}
+	return false
 }

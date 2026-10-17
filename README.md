@@ -89,6 +89,12 @@ go build -o bin/helmbulance ./cmd/helmbulance
 
 The fixtures in `testdata/charts/` show what it finds: each defect has a fixed twin that must pass.
 
+**Secret drift severity.** A changed or removed key is rated from its name and its readers. It is high for a credential (password, token, key) that a workload with a PersistentVolumeClaim reads, since that data was likely written with the old value. It is low for TLS material, which charts often reissue on purpose. Everything else is medium. If the chart rotates a key on purpose, list it and it is named in the summary instead of reported. Secret names carry the release name, `hb-upgrade` in `upgrade-without-values` and `hb-chart` in `chart-upgrade`, so use a glob:
+
+```sh
+./bin/helmbulance test ./path/to/chart --expected-rotation '*-webhook-tls/*'
+```
+
 **Run only charts you trust.** `test` and `matrix` install the chart into a kind cluster on your Docker host, and the protections for someone else's chart (architecture §4) arrive in v0.3. Until then any third-party chart runs unprotected, whether it comes from a repository or a local copy. `test` and `matrix` refuse a repository, OCI or URL reference unless you pass `--allow-remote`. The refusal catches mistakes; it is not a protection: `helm pull --untar` and a local path skip it, and a local chart's vendored `charts/` subcharts are third-party code too. `scan` only renders the chart and needs no cluster.
 
 ## Contributing
