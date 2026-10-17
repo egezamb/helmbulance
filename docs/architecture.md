@@ -60,6 +60,7 @@ chart + values ─▶ Chart model ─▶ Sandbox ─▶ Scenario engine ─▶ O
   - Reusing a cluster (`--cluster`) checks that fingerprint.
   - There is no flag to run scenarios against any other cluster. Lifecycle and network scenarios uninstall releases and open connections; they must never meet a real cluster.
 - **`--set` values** are masked in every transcript and report.
+- **What reports keep out:** the user info and query values of every URL (a chart URL with credentials, a `--traffic-path` with a token), `$HOME` (shown as `~`) and a state dir outside it. When helm writes an `Error:` line, only the last one goes into a summary or evidence; evidence is escaped like other cluster text.
 
 ### 3.2 Chart model
 
@@ -201,7 +202,7 @@ Every oracle has a fixture: a small chart with the defect and a fixed twin (`tes
 - **Exit codes:** `0` clean, `1` findings, `2` tool error, `3` incomplete (for example, the chart did not install).
 - **Redaction:**
   - Secret `data` and `stringData`, and Helm release Secrets in full.
-  - URL user info.
+  - URL user info and query values.
   - env and ConfigMap values whose names look secret.
   - Any known secret value found verbatim in logs or events.
 - **Escaping:** text that comes from the cluster (names, events, logs) is escaped and length-limited before it reaches Markdown, a terminal or a pull request comment.

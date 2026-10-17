@@ -29,6 +29,12 @@ exit 0
 // runZeroDowntime runs the scenario against fake kubectl and helm, with the given traffic logs.
 func runZeroDowntime(t *testing.T, logs map[string]string) Result {
 	t.Helper()
+	return runZeroDowntimePath(t, logs, "")
+}
+
+// runZeroDowntimePath is runZeroDowntime with a --traffic-path.
+func runZeroDowntimePath(t *testing.T, logs map[string]string, path string) Result {
+	t.Helper()
 	c, l, tl := controlDuration, trafficLead, trafficTail
 	t.Cleanup(func() { controlDuration, trafficLead, trafficTail = c, l, tl })
 	controlDuration, trafficLead, trafficTail = time.Millisecond, time.Millisecond, time.Millisecond
@@ -47,11 +53,12 @@ func runZeroDowntime(t *testing.T, logs map[string]string) Result {
 	t.Setenv("FAKE_LOGS", logDir)
 	runner := &execx.Runner{}
 	env := &Env{
-		Runner: runner,
-		Helm:   &helm.Client{Runner: runner, Timeout: time.Minute},
-		Kube:   &kube.Client{Runner: runner},
-		Chart:  "./chart",
-		Log:    io.Discard,
+		Runner:      runner,
+		Helm:        &helm.Client{Runner: runner, Timeout: time.Minute},
+		Kube:        &kube.Client{Runner: runner},
+		Chart:       "./chart",
+		TrafficPath: path,
+		Log:         io.Discard,
 	}
 	return ZeroDowntime{}.Run(t.Context(), env)
 }
@@ -135,6 +142,23 @@ func TestZeroDowntimeReportsANoisyFirstControl(t *testing.T) {
 	}
 	if ev := strings.Join(res.Findings[0].Evidence, " "); !strings.Contains(ev, "The first control lost 2 of 3 requests") {
 		t.Errorf("evidence %q does not mention the noisy first control", ev)
+	}
+}
+
+// A --traffic-path can carry a token; the summary and evidence go into shared reports.
+func TestZeroDowntimeHidesTheTrafficPathQuery(t *testing.T) {
+	for name, logs := range map[string]map[string]string{
+		"failed controls":  {"hb-traffic-control": "100 fail\n", "hb-traffic-control-2": "200 fail\n"},
+		"failed treatment": {"hb-traffic-control": "100 ok\n", "hb-traffic": "300 ok\n301 fail\n"},
+	} {
+		res := runZeroDowntimePath(t, logs, "/health?token=hunter2")
+		text := res.Summary
+		for _, f := range res.Findings {
+			text += strings.Join(f.Evidence, " ") + strings.Join(f.Reproduce, " ")
+		}
+		if !strings.Contains(text, "token=***") || strings.Contains(text, "hunter2") {
+			t.Errorf("%s: want the token hidden, got: %s", name, text)
+		}
 	}
 }
 

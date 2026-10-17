@@ -6,7 +6,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +28,9 @@ type Runner struct {
 	// Secrets are values (from --set) that are replaced with *** in error text, since helm can
 	// quote them in schema errors and chart fail messages.
 	Secrets []string
+	// Paths are local paths replaced in the transcript and in error text, as path → placeholder:
+	// $HOME holds the user name, and the state dir holds the sandbox kubeconfig.
+	Paths map[string]string
 
 	mu         sync.Mutex
 	transcript []Command
@@ -47,7 +53,7 @@ func (r *Runner) RunCapture(ctx context.Context, name string, args ...string) ([
 
 	start := time.Now()
 	err := cmd.Run()
-	rec := Command{Line: Mask(name, args), Duration: time.Since(start).Round(time.Millisecond)}
+	rec := Command{Line: r.HidePaths(Mask(name, args)), Duration: time.Since(start).Round(time.Millisecond)}
 	if cmd.ProcessState != nil {
 		rec.ExitCode = cmd.ProcessState.ExitCode()
 	}
@@ -55,7 +61,7 @@ func (r *Runner) RunCapture(ctx context.Context, name string, args ...string) ([
 	r.transcript = append(r.transcript, rec)
 	r.mu.Unlock()
 
-	errText := []byte(Redact(stderr.String(), r.Secrets))
+	errText := []byte(r.hide(stderr.String()))
 	if err != nil {
 		return stdout.Bytes(), errText, fmt.Errorf("%s: %w: %s", rec.Line, err, r.errorText(stderr.String()))
 	}
@@ -69,9 +75,33 @@ func (r *Runner) errorText(stderr string) string {
 	const marker = "Error: "
 	stderr = strings.TrimSpace(stderr)
 	if i := strings.LastIndex(stderr, marker); i >= 0 && (i == 0 || stderr[i-1] == '\n') {
-		return marker + Redact(stderr[i+len(marker):], r.Secrets)
+		return marker + r.hide(stderr[i+len(marker):])
 	}
-	return Redact(stderr, r.Secrets)
+	return r.hide(stderr)
+}
+
+// hide removes the secrets and URL credentials from text that goes into a report.
+func (r *Runner) hide(text string) string {
+	return r.HidePaths(RedactURLs(Redact(text, r.Secrets)))
+}
+
+// Hide is hide exported, so the report package can apply the same masking (secret values, URL
+// credentials, local paths) to every field it writes. It is idempotent.
+func (r *Runner) Hide(text string) string { return r.hide(text) }
+
+// HidePaths replaces r.Paths, longest first. A path counts only when it ends there or a '/'
+// follows, so /home/eger is not taken for /home/ege.
+func (r *Runner) HidePaths(text string) string {
+	paths := slices.Collect(maps.Keys(r.Paths))
+	slices.SortFunc(paths, func(a, b string) int { return len(b) - len(a) })
+	for _, p := range paths {
+		if p == "" || p == "/" {
+			continue
+		}
+		re := regexp.MustCompile(regexp.QuoteMeta(p) + `(/|[^\w.-]|$)`)
+		text = re.ReplaceAllString(text, strings.ReplaceAll(r.Paths[p], "$", "$$")+"${1}")
+	}
+	return text
 }
 
 // Transcript returns the commands run so far.
@@ -101,7 +131,7 @@ func Mask(name string, args []string) string {
 			out = append(out, a)
 		}
 	}
-	return strings.Join(out, " ")
+	return RedactURLs(strings.Join(out, " "))
 }
 
 func isSetFlag(a string) bool {
